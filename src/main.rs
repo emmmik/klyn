@@ -49,11 +49,20 @@ fn handle_connection(mut stream: TcpStream) {
         .map(|s| s.to_string())
         .collect();
 
-    println!("{:#?}", parse_frame(&request_vector));
-    println!(
-        "{:#?}",
-        encode_frame(&parse_frame(&request_vector).unwrap().0)
-    );
+    let frame = parse_frame(&request_vector).unwrap().0;
+    if frame == Frame::Array(vec![Frame::BulkString(String::from("PING"))]) {
+        stream.write_all(
+            encode_frame(&Frame::SimpleString(String::from("PONG")))
+                .unwrap()
+                .as_bytes(),
+        );
+        stream.flush();
+    }
+    // println!("{:#?}", parse_frame(&request_vector));
+    // println!(
+    //     "{:#?}",
+    //     encode_frame(&parse_frame(&request_vector).unwrap().0)
+    // );
 }
 
 fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
