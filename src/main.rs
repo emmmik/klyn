@@ -12,6 +12,24 @@ enum Frame {
     Array(Vec<Frame>),
 }
 
+impl Frame {
+    fn get_value(&self) -> Option<&String> {
+        match self {
+            Self::SimpleString(s) => Some(s),
+            Self::SimpleError(s) => Some(s),
+            Self::BulkString(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn get_array(&self) -> Option<&Vec<Frame>> {
+        match self {
+            Self::Array(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
@@ -32,6 +50,10 @@ fn handle_connection(mut stream: TcpStream) {
         .collect();
 
     println!("{:#?}", parse_frame(&request_vector));
+    println!(
+        "{:#?}",
+        encode_frame(&parse_frame(&request_vector).unwrap().0)
+    );
 }
 
 fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
@@ -55,7 +77,7 @@ fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
             let mut array_elements: Vec<Frame> = Vec::new();
 
             let mut array_size = 0;
-            for i in 1..first_command_rest.len() {
+            for i in 1..first_command.len() {
                 array_size = array_size * 10 + first_command.as_bytes()[i] - b'0';
             }
             let mut rem = request[1..].to_vec();
@@ -69,6 +91,46 @@ fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
         }
         // (b'-', data) => Some(Frame::SimpleError),
         // Some(b':') => Some(Frame::Integer),
+        _ => None,
+    }
+}
+
+fn encode_frame(request: &Frame) -> Option<String> {
+    let mut converted_string = String::new();
+    match request {
+        Frame::SimpleString(s) => {
+            converted_string += "+";
+            converted_string += s;
+            converted_string += "\r\n";
+
+            Some(converted_string)
+        }
+        Frame::SimpleError(s) => {
+            converted_string += "-";
+            converted_string += s;
+            converted_string += "\r\n";
+
+            Some(converted_string)
+        }
+        Frame::BulkString(s) => {
+            converted_string += "$";
+            converted_string += &s.len().to_string();
+            converted_string += "\r\n";
+            converted_string += s;
+            converted_string += "\r\n";
+
+            Some(converted_string)
+        }
+        Frame::Array(arr) => {
+            converted_string += "*";
+            converted_string += &arr.len().to_string();
+            converted_string += "\r\n";
+            for element in arr {
+                converted_string += &encode_frame(element).unwrap();
+            }
+            Some(converted_string)
+        }
+
         _ => None,
     }
 }
