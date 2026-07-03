@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::prelude::*,
     net::{TcpListener, TcpStream},
     str,
@@ -33,14 +34,16 @@ impl Frame {
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
+    let mut hm: HashMap<String, String> = HashMap::new();
+
     for stream in listener.incoming() {
         let stream = stream.unwrap();
 
-        handle_connection(stream);
+        handle_connection(stream, &mut hm);
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
     let mut buffer = [0; 512];
     let buffer_size = stream.read(&mut buffer).unwrap();
     let request_string = str::from_utf8(&buffer[..buffer_size]).unwrap();
@@ -50,14 +53,34 @@ fn handle_connection(mut stream: TcpStream) {
         .collect();
 
     let frame = parse_frame(&request_vector).unwrap().0;
-    if frame == Frame::Array(vec![Frame::BulkString(String::from("PING"))]) {
-        stream.write_all(
-            encode_frame(&Frame::SimpleString(String::from("PONG")))
-                .unwrap()
-                .as_bytes(),
-        );
-        stream.flush();
-    }
+
+    let response: Option<Frame> = match frame {
+        Frame::Array(elements) => match &elements[0] {
+            Frame::BulkString(s) if s == "PING" => Some(Frame::SimpleString("PONG".to_string())),
+            Frame::BulkString(s) if s == "SET" => {
+                hm.insert(
+                    elements[1].get_value().unwrap().to_string(),
+                    elements[2].get_value().unwrap().to_string(),
+                );
+
+                Some(Frame::SimpleString("OK".to_string()))
+            }
+            Frame::BulkString(s) if s == "GET" => {
+                match hm.get(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => Some(Frame::BulkString(value.to_string())),
+                    _ => Some(Frame::SimpleError(
+                        "No value was found for this key".to_string(),
+                    )),
+                }
+            }
+
+            _ => None,
+        },
+        _ => None,
+    };
+
+    stream.write_all(encode_frame(&response.unwrap()).unwrap().as_bytes());
+
     // println!("{:#?}", parse_frame(&request_vector));
     // println!(
     //     "{:#?}",
