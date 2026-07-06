@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs::{File, OpenOptions},
     io::prelude::*,
     net::{TcpListener, TcpStream},
     str,
@@ -36,15 +37,40 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
     let mut hm: HashMap<String, String> = HashMap::new();
+    let mut file = OpenOptions::new()
+        .append(true)
+        .read(true)
+        .open("klyn.aof")
+        .unwrap();
+    let file_string = std::fs::read_to_string("klyn.aof").unwrap();
+    let file_vector: Vec<String> = file_string.split("\r\n").map(|s| s.to_string()).collect();
+    let mut rem: Vec<String> = file_vector;
+    rem.pop();
+    while let Some((frame, remaining)) = parse_frame(&rem) {
+        let elements = frame.get_array().unwrap();
+        match &elements[0] {
+            Frame::BulkString(Some(s)) if s == "SET" => {
+                hm.insert(
+                    elements[1].get_value().unwrap().to_string(),
+                    elements[2].get_value().unwrap().to_string(),
+                );
+            }
+            Frame::BulkString(Some(s)) if s == "DEL" => {
+                hm.remove(&elements[1].get_value().unwrap().to_string());
+            }
+            _ => (),
+        };
+        rem = remaining;
+    }
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
 
-        handle_connection(stream, &mut hm);
+        handle_connection(stream, &mut hm, &mut file);
     }
 }
 
-fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
+fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, file: &mut File) {
     let mut buffer = [0; 512];
     let buffer_size = stream.read(&mut buffer).unwrap();
     let request_string = str::from_utf8(&buffer[..buffer_size]).unwrap();
@@ -66,6 +92,14 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
                     elements[2].get_value().unwrap().to_string(),
                 );
 
+                let command_frame = Frame::Array(vec![
+                    Frame::BulkString(Some("SET".to_string())),
+                    Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
+                    Frame::BulkString(Some(elements[2].get_value().unwrap().to_string())),
+                ]);
+                let command_string = encode_frame(&command_frame).unwrap();
+                file.write_all(command_string.as_bytes()).unwrap();
+
                 Some(Frame::SimpleString("OK".to_string()))
             }
             Frame::BulkString(Some(s)) if s == "GET" => {
@@ -78,6 +112,12 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
                 match &hm.get(&elements[1].get_value().unwrap().to_string()) {
                     Some(value) => {
                         hm.remove(&elements[1].get_value().unwrap().to_string());
+                        let command_frame = Frame::Array(vec![
+                            Frame::BulkString(Some("DEL".to_string())),
+                            Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
+                        ]);
+                        let command_string = encode_frame(&command_frame).unwrap();
+                        file.write_all(command_string.as_bytes());
                         Some(Frame::Integer(1))
                     }
                     _ => Some(Frame::Integer(0)),
@@ -107,6 +147,9 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
 }
 
 fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
+    if request.len() == 0 {
+        return None;
+    }
     let first_command = &request[0];
     let first_command_rest = &first_command[1..];
 
