@@ -9,8 +9,9 @@ use std::{
 enum Frame {
     SimpleString(String),
     SimpleError(String),
-    BulkString(String),
+    BulkString(Option<String>),
     Array(Vec<Frame>),
+    Integer(i32),
 }
 
 impl Frame {
@@ -18,7 +19,7 @@ impl Frame {
         match self {
             Self::SimpleString(s) => Some(s),
             Self::SimpleError(s) => Some(s),
-            Self::BulkString(s) => Some(s),
+            Self::BulkString(Some(s)) => Some(s),
             _ => None,
         }
     }
@@ -56,8 +57,10 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
 
     let response: Option<Frame> = match frame {
         Frame::Array(elements) => match &elements[0] {
-            Frame::BulkString(s) if s == "PING" => Some(Frame::SimpleString("PONG".to_string())),
-            Frame::BulkString(s) if s == "SET" => {
+            Frame::BulkString(Some(s)) if s == "PING" => {
+                Some(Frame::SimpleString("PONG".to_string()))
+            }
+            Frame::BulkString(Some(s)) if s == "SET" => {
                 hm.insert(
                     elements[1].get_value().unwrap().to_string(),
                     elements[2].get_value().unwrap().to_string(),
@@ -65,31 +68,46 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>) {
 
                 Some(Frame::SimpleString("OK".to_string()))
             }
-            Frame::BulkString(s) if s == "GET" => {
+            Frame::BulkString(Some(s)) if s == "GET" => {
                 match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => Some(Frame::BulkString(value.to_string())),
-                    _ => Some(Frame::SimpleError(
-                        "No value was found for this key".to_string(),
-                    )),
+                    Some(value) => Some(Frame::BulkString(Some(value.to_string()))),
+                    _ => Some(Frame::BulkString(None)),
                 }
             }
+            Frame::BulkString(Some(s)) if s == "DEL" => {
+                match &hm.get(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        hm.remove(&elements[1].get_value().unwrap().to_string());
+                        Some(Frame::Integer(1))
+                    }
+                    _ => Some(Frame::Integer(0)),
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "EXISTS" => {
+                match &hm.get(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => Some(Frame::Integer(1)),
+                    _ => Some(Frame::Integer(0)),
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "KEYS" => {
+                let mut keys: Vec<Frame> = Vec::new();
+                let mut values: Vec<_> = hm.clone().into_keys().collect();
 
-            _ => None,
+                for key in values {
+                    keys.push(Frame::BulkString(Some(key)));
+                }
+                Some(Frame::Array(keys))
+            }
+            _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
         },
         _ => None,
     };
 
     stream.write_all(encode_frame(&response.unwrap()).unwrap().as_bytes());
-
-    // println!("{:#?}", parse_frame(&request_vector));
-    // println!(
-    //     "{:#?}",
-    //     encode_frame(&parse_frame(&request_vector).unwrap().0)
-    // );
 }
 
 fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
-    let first_command = String::from(&request[0]);
+    let first_command = &request[0];
     let first_command_rest = &first_command[1..];
 
     match first_command.as_bytes()[0] {
@@ -101,8 +119,12 @@ fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
             Frame::SimpleError(String::from(first_command_rest)),
             request[1..].to_vec(),
         )),
+        b':' => Some((
+            Frame::Integer(first_command_rest.parse::<i32>().unwrap()),
+            request[1..].to_vec(),
+        )),
         b'$' => Some((
-            Frame::BulkString(String::from(&request[1])),
+            Frame::BulkString(Some(String::from(&request[1]))),
             request[2..].to_vec(),
         )),
         b'*' => {
@@ -121,8 +143,6 @@ fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
 
             Some((Frame::Array(array_elements), rem))
         }
-        // (b'-', data) => Some(Frame::SimpleError),
-        // Some(b':') => Some(Frame::Integer),
         _ => None,
     }
 }
@@ -144,7 +164,14 @@ fn encode_frame(request: &Frame) -> Option<String> {
 
             Some(converted_string)
         }
-        Frame::BulkString(s) => {
+        Frame::Integer(num) => {
+            converted_string = ":".to_string();
+            converted_string += &num.to_string();
+            converted_string += "\r\n";
+
+            Some(converted_string)
+        }
+        Frame::BulkString(Some(s)) => {
             converted_string += "$";
             converted_string += &s.len().to_string();
             converted_string += "\r\n";
@@ -153,6 +180,7 @@ fn encode_frame(request: &Frame) -> Option<String> {
 
             Some(converted_string)
         }
+        Frame::BulkString(None) => Some("$-1\r\n".to_string()),
         Frame::Array(arr) => {
             converted_string += "*";
             converted_string += &arr.len().to_string();
@@ -166,14 +194,3 @@ fn encode_frame(request: &Frame) -> Option<String> {
         _ => None,
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     #[test]
-//     fn test_simple_string() {
-//         let input = b"+OK\r\n";
-//         let frame: Option<Frame> = Some(parse_frame(str::from_utf8(input).unwrap().1);
-//         assert_eq!(frame, Some(Frame::SimpleString(String::from("OK\r\n"))));
-//     }
-// }
