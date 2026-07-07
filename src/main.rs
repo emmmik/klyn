@@ -4,6 +4,8 @@ use std::{
     io::prelude::*,
     net::{TcpListener, TcpStream},
     str,
+    sync::{Arc, Mutex},
+    thread,
 };
 
 #[derive(Debug, PartialEq)]
@@ -36,17 +38,22 @@ impl Frame {
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
-    let mut hm: HashMap<String, String> = HashMap::new();
-    let mut file = OpenOptions::new()
-        .append(true)
-        .read(true)
-        .open("klyn.aof")
-        .unwrap();
+    let db: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let aof = Arc::new(Mutex::new(
+        OpenOptions::new()
+            .append(true)
+            .read(true)
+            .open("klyn.aof")
+            .unwrap(),
+    ));
     let file_string = std::fs::read_to_string("klyn.aof").unwrap();
     let file_vector: Vec<String> = file_string.split("\r\n").map(|s| s.to_string()).collect();
     let mut rem: Vec<String> = file_vector;
     rem.pop();
     while let Some((frame, remaining)) = parse_frame(&rem) {
+        let counter = Arc::clone(&db);
+        let mut hm = counter.lock().unwrap();
+
         let elements = frame.get_array().unwrap();
         match &elements[0] {
             Frame::BulkString(Some(s)) if s == "SET" => {
@@ -63,10 +70,22 @@ fn main() {
         rem = remaining;
     }
 
+    let mut handles = vec![];
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
+        let counter_db = Arc::clone(&db);
+        let counter_aof = Arc::clone(&aof);
 
-        handle_connection(stream, &mut hm, &mut file);
+        let handle = thread::spawn(move || {
+            let mut hm = counter_db.lock().unwrap();
+            let mut file = counter_aof.lock().unwrap();
+            let stream = stream.unwrap();
+
+            handle_connection(stream, &mut hm, &mut file);
+        });
+        handles.push(handle);
+    }
+    for handle in handles {
+        handle.join().unwrap();
     }
 }
 
@@ -110,14 +129,14 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, fi
             }
             Frame::BulkString(Some(s)) if s == "DEL" => {
                 match &hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
+                    Some(_value) => {
                         hm.remove(&elements[1].get_value().unwrap().to_string());
                         let command_frame = Frame::Array(vec![
                             Frame::BulkString(Some("DEL".to_string())),
                             Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
                         ]);
                         let command_string = encode_frame(&command_frame).unwrap();
-                        file.write_all(command_string.as_bytes());
+                        file.write_all(command_string.as_bytes()).unwrap();
                         Some(Frame::Integer(1))
                     }
                     _ => Some(Frame::Integer(0)),
@@ -125,13 +144,13 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, fi
             }
             Frame::BulkString(Some(s)) if s == "EXISTS" => {
                 match &hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => Some(Frame::Integer(1)),
+                    Some(_value) => Some(Frame::Integer(1)),
                     _ => Some(Frame::Integer(0)),
                 }
             }
             Frame::BulkString(Some(s)) if s == "KEYS" => {
                 let mut keys: Vec<Frame> = Vec::new();
-                let mut values: Vec<_> = hm.clone().into_keys().collect();
+                let values: Vec<_> = hm.clone().into_keys().collect();
 
                 for key in values {
                     keys.push(Frame::BulkString(Some(key)));
@@ -143,11 +162,13 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, fi
         _ => None,
     };
 
-    stream.write_all(encode_frame(&response.unwrap()).unwrap().as_bytes());
+    stream
+        .write_all(encode_frame(&response.unwrap()).unwrap().as_bytes())
+        .unwrap();
 }
 
 fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
-    if request.len() == 0 {
+    if request.is_empty() {
         return None;
     }
     let first_command = &request[0];
@@ -178,7 +199,7 @@ fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
                 array_size = array_size * 10 + first_command.as_bytes()[i] - b'0';
             }
             let mut rem = request[1..].to_vec();
-            for i in 0..array_size {
+            for _i in 0..array_size {
                 let element = parse_frame(&rem).unwrap();
                 array_elements.push(element.0);
                 rem = element.1;
@@ -233,7 +254,5 @@ fn encode_frame(request: &Frame) -> Option<String> {
             }
             Some(converted_string)
         }
-
-        _ => None,
     }
 }
