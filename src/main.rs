@@ -76,11 +76,11 @@ fn main() {
         let counter_aof = Arc::clone(&aof);
 
         let handle = thread::spawn(move || {
-            let mut hm = counter_db.lock().unwrap();
-            let mut file = counter_aof.lock().unwrap();
+            // let mut hm = counter_db.lock().unwrap();
+            // let mut file = counter_aof.lock().unwrap();
             let stream = stream.unwrap();
 
-            handle_connection(stream, &mut hm, &mut file);
+            handle_connection(stream, &counter_db, &counter_aof);
         });
         handles.push(handle);
     }
@@ -89,7 +89,11 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, file: &mut File) {
+fn handle_connection(
+    mut stream: TcpStream,
+    counter_db: &Arc<Mutex<HashMap<String, String>>>,
+    counter_aof: &Arc<Mutex<File>>,
+) {
     let mut buffer = [0; 512];
     let buffer_size = stream.read(&mut buffer).unwrap();
     let request_string = str::from_utf8(&buffer[..buffer_size]).unwrap();
@@ -99,7 +103,8 @@ fn handle_connection(mut stream: TcpStream, hm: &mut HashMap<String, String>, fi
         .collect();
 
     let frame = parse_frame(&request_vector).unwrap().0;
-
+    let mut hm = counter_db.lock().unwrap();
+    let mut file = counter_aof.lock().unwrap();
     let response: Option<Frame> = match frame {
         Frame::Array(elements) => match &elements[0] {
             Frame::BulkString(Some(s)) if s == "PING" => {
