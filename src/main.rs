@@ -6,6 +6,7 @@ use std::{
     str,
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, PartialEq)]
@@ -38,7 +39,8 @@ impl Frame {
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
-    let db: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let db: Arc<Mutex<HashMap<String, (String, Option<Instant>)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let aof = Arc::new(Mutex::new(
         OpenOptions::new()
             .append(true)
@@ -59,7 +61,7 @@ fn main() {
             Frame::BulkString(Some(s)) if s == "SET" => {
                 hm.insert(
                     elements[1].get_value().unwrap().to_string(),
-                    elements[2].get_value().unwrap().to_string(),
+                    (elements[2].get_value().unwrap().to_string(), None),
                 );
             }
             Frame::BulkString(Some(s)) if s == "DEL" => {
@@ -91,7 +93,7 @@ fn main() {
 
 fn handle_connection(
     mut stream: TcpStream,
-    counter_db: &Arc<Mutex<HashMap<String, String>>>,
+    counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
     counter_aof: &Arc<Mutex<File>>,
 ) {
     let mut buffer = [0; 512];
@@ -113,7 +115,7 @@ fn handle_connection(
             Frame::BulkString(Some(s)) if s == "SET" => {
                 hm.insert(
                     elements[1].get_value().unwrap().to_string(),
-                    elements[2].get_value().unwrap().to_string(),
+                    (elements[2].get_value().unwrap().to_string(), None),
                 );
 
                 let command_frame = Frame::Array(vec![
@@ -126,9 +128,87 @@ fn handle_connection(
 
                 Some(Frame::SimpleString("OK".to_string()))
             }
+            Frame::BulkString(Some(s)) if s == "EXPIRE" => {
+                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        value.1 = Some(
+                            Instant::now()
+                                + Duration::from_secs(
+                                    elements[2].get_value().unwrap().parse::<u64>().unwrap(),
+                                ),
+                        );
+                        Some(Frame::Integer(1))
+                    }
+                    _ => Some(Frame::Integer(0)),
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "TTL" => {
+                match hm.get(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        if value.1 == None {
+                            Some(Frame::Integer(-1))
+                        } else if value.1.unwrap() >= Instant::now() {
+                            Some(Frame::Integer(
+                                (value.1.unwrap() - Instant::now()).as_secs() as i32,
+                            ))
+                        } else {
+                            hm.remove(&elements[1].get_value().unwrap().to_string());
+                            let command_frame = Frame::Array(vec![
+                                Frame::BulkString(Some("DEL".to_string())),
+                                Frame::BulkString(Some(
+                                    elements[1].get_value().unwrap().to_string(),
+                                )),
+                            ]);
+                            let command_string = encode_frame(&command_frame).unwrap();
+                            file.write_all(command_string.as_bytes()).unwrap();
+                            Some(Frame::Integer(-2))
+                        }
+                    }
+                    _ => Some(Frame::Integer(-2)),
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "PERSIST" => {
+                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        if value.1 == None {
+                            Some(Frame::Integer(0))
+                        } else if value.1.unwrap() >= Instant::now() {
+                            value.1 = None;
+                            Some(Frame::Integer(1))
+                        } else {
+                            hm.remove(&elements[1].get_value().unwrap().to_string());
+                            let command_frame = Frame::Array(vec![
+                                Frame::BulkString(Some("DEL".to_string())),
+                                Frame::BulkString(Some(
+                                    elements[1].get_value().unwrap().to_string(),
+                                )),
+                            ]);
+                            let command_string = encode_frame(&command_frame).unwrap();
+                            file.write_all(command_string.as_bytes()).unwrap();
+                            Some(Frame::Integer(0))
+                        }
+                    }
+                    _ => Some(Frame::Integer(0)),
+                }
+            }
             Frame::BulkString(Some(s)) if s == "GET" => {
                 match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => Some(Frame::BulkString(Some(value.to_string()))),
+                    Some(value) => {
+                        if value.1 == None || value.1.unwrap() >= Instant::now() {
+                            Some(Frame::BulkString(Some(value.0.to_string())))
+                        } else {
+                            hm.remove(&elements[1].get_value().unwrap().to_string());
+                            let command_frame = Frame::Array(vec![
+                                Frame::BulkString(Some("DEL".to_string())),
+                                Frame::BulkString(Some(
+                                    elements[1].get_value().unwrap().to_string(),
+                                )),
+                            ]);
+                            let command_string = encode_frame(&command_frame).unwrap();
+                            file.write_all(command_string.as_bytes()).unwrap();
+                            Some(Frame::BulkString(None))
+                        }
+                    }
                     _ => Some(Frame::BulkString(None)),
                 }
             }
@@ -158,7 +238,19 @@ fn handle_connection(
                 let values: Vec<_> = hm.clone().into_keys().collect();
 
                 for key in values {
-                    keys.push(Frame::BulkString(Some(key)));
+                    if let Some(value) = hm.get(&key) {
+                        if value.1 == None || value.1.unwrap() >= Instant::now() {
+                            keys.push(Frame::BulkString(Some(key)));
+                        } else {
+                            hm.remove(&key);
+                            let command_frame = Frame::Array(vec![
+                                Frame::BulkString(Some("DEL".to_string())),
+                                Frame::BulkString(Some(key)),
+                            ]);
+                            let command_string = encode_frame(&command_frame).unwrap();
+                            file.write_all(command_string.as_bytes()).unwrap();
+                        }
+                    }
                 }
                 Some(Frame::Array(keys))
             }
