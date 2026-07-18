@@ -1,3 +1,9 @@
+mod encoder;
+mod frame;
+mod parser;
+
+use frame::Frame;
+
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -8,33 +14,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-#[derive(Debug, PartialEq)]
-enum Frame {
-    SimpleString(String),
-    SimpleError(String),
-    BulkString(Option<String>),
-    Array(Vec<Frame>),
-    Integer(i32),
-}
-
-impl Frame {
-    fn get_value(&self) -> Option<&String> {
-        match self {
-            Self::SimpleString(s) => Some(s),
-            Self::SimpleError(s) => Some(s),
-            Self::BulkString(Some(s)) => Some(s),
-            _ => None,
-        }
-    }
-
-    fn get_array(&self) -> Option<&Vec<Frame>> {
-        match self {
-            Self::Array(v) => Some(v),
-            _ => None,
-        }
-    }
-}
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
@@ -52,7 +31,7 @@ fn main() {
     let file_vector: Vec<String> = file_string.split("\r\n").map(|s| s.to_string()).collect();
     let mut rem: Vec<String> = file_vector;
     rem.pop();
-    while let Some((frame, remaining)) = parse_frame(&rem) {
+    while let Some((frame, remaining)) = parser::parse_frame(&rem) {
         let counter = Arc::clone(&db);
         let mut hm = counter.lock().unwrap();
 
@@ -104,7 +83,7 @@ fn handle_connection(
         .map(|s| s.to_string())
         .collect();
 
-    let frame = parse_frame(&request_vector).unwrap().0;
+    let frame = parser::parse_frame(&request_vector).unwrap().0;
     let mut hm = counter_db.lock().unwrap();
     let mut file = counter_aof.lock().unwrap();
     let response: Option<Frame> = match frame {
@@ -123,7 +102,7 @@ fn handle_connection(
                     Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
                     Frame::BulkString(Some(elements[2].get_value().unwrap().to_string())),
                 ]);
-                let command_string = encode_frame(&command_frame).unwrap();
+                let command_string = encoder::encode_frame(&command_frame).unwrap();
                 file.write_all(command_string.as_bytes()).unwrap();
 
                 Some(Frame::SimpleString("OK".to_string()))
@@ -159,7 +138,7 @@ fn handle_connection(
                                     elements[1].get_value().unwrap().to_string(),
                                 )),
                             ]);
-                            let command_string = encode_frame(&command_frame).unwrap();
+                            let command_string = encoder::encode_frame(&command_frame).unwrap();
                             file.write_all(command_string.as_bytes()).unwrap();
                             Some(Frame::Integer(-2))
                         }
@@ -183,7 +162,7 @@ fn handle_connection(
                                     elements[1].get_value().unwrap().to_string(),
                                 )),
                             ]);
-                            let command_string = encode_frame(&command_frame).unwrap();
+                            let command_string = encoder::encode_frame(&command_frame).unwrap();
                             file.write_all(command_string.as_bytes()).unwrap();
                             Some(Frame::Integer(0))
                         }
@@ -204,7 +183,7 @@ fn handle_connection(
                                     elements[1].get_value().unwrap().to_string(),
                                 )),
                             ]);
-                            let command_string = encode_frame(&command_frame).unwrap();
+                            let command_string = encoder::encode_frame(&command_frame).unwrap();
                             file.write_all(command_string.as_bytes()).unwrap();
                             Some(Frame::BulkString(None))
                         }
@@ -220,7 +199,7 @@ fn handle_connection(
                             Frame::BulkString(Some("DEL".to_string())),
                             Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
                         ]);
-                        let command_string = encode_frame(&command_frame).unwrap();
+                        let command_string = encoder::encode_frame(&command_frame).unwrap();
                         file.write_all(command_string.as_bytes()).unwrap();
                         Some(Frame::Integer(1))
                     }
@@ -247,7 +226,7 @@ fn handle_connection(
                                 Frame::BulkString(Some("DEL".to_string())),
                                 Frame::BulkString(Some(key)),
                             ]);
-                            let command_string = encode_frame(&command_frame).unwrap();
+                            let command_string = encoder::encode_frame(&command_frame).unwrap();
                             file.write_all(command_string.as_bytes()).unwrap();
                         }
                     }
@@ -260,96 +239,10 @@ fn handle_connection(
     };
 
     stream
-        .write_all(encode_frame(&response.unwrap()).unwrap().as_bytes())
+        .write_all(
+            encoder::encode_frame(&response.unwrap())
+                .unwrap()
+                .as_bytes(),
+        )
         .unwrap();
-}
-
-fn parse_frame(request: &Vec<String>) -> Option<(Frame, Vec<String>)> {
-    if request.is_empty() {
-        return None;
-    }
-    let first_command = &request[0];
-    let first_command_rest = &first_command[1..];
-
-    match first_command.as_bytes()[0] {
-        b'+' => Some((
-            Frame::SimpleString(String::from(first_command_rest)),
-            request[1..].to_vec(),
-        )),
-        b'-' => Some((
-            Frame::SimpleError(String::from(first_command_rest)),
-            request[1..].to_vec(),
-        )),
-        b':' => Some((
-            Frame::Integer(first_command_rest.parse::<i32>().unwrap()),
-            request[1..].to_vec(),
-        )),
-        b'$' => Some((
-            Frame::BulkString(Some(String::from(&request[1]))),
-            request[2..].to_vec(),
-        )),
-        b'*' => {
-            let mut array_elements: Vec<Frame> = Vec::new();
-
-            let mut array_size = 0;
-            for i in 1..first_command.len() {
-                array_size = array_size * 10 + first_command.as_bytes()[i] - b'0';
-            }
-            let mut rem = request[1..].to_vec();
-            for _i in 0..array_size {
-                let element = parse_frame(&rem).unwrap();
-                array_elements.push(element.0);
-                rem = element.1;
-            }
-
-            Some((Frame::Array(array_elements), rem))
-        }
-        _ => None,
-    }
-}
-
-fn encode_frame(request: &Frame) -> Option<String> {
-    let mut converted_string = String::new();
-    match request {
-        Frame::SimpleString(s) => {
-            converted_string += "+";
-            converted_string += s;
-            converted_string += "\r\n";
-
-            Some(converted_string)
-        }
-        Frame::SimpleError(s) => {
-            converted_string += "-";
-            converted_string += s;
-            converted_string += "\r\n";
-
-            Some(converted_string)
-        }
-        Frame::Integer(num) => {
-            converted_string = ":".to_string();
-            converted_string += &num.to_string();
-            converted_string += "\r\n";
-
-            Some(converted_string)
-        }
-        Frame::BulkString(Some(s)) => {
-            converted_string += "$";
-            converted_string += &s.len().to_string();
-            converted_string += "\r\n";
-            converted_string += s;
-            converted_string += "\r\n";
-
-            Some(converted_string)
-        }
-        Frame::BulkString(None) => Some("$-1\r\n".to_string()),
-        Frame::Array(arr) => {
-            converted_string += "*";
-            converted_string += &arr.len().to_string();
-            converted_string += "\r\n";
-            for element in arr {
-                converted_string += &encode_frame(element).unwrap();
-            }
-            Some(converted_string)
-        }
-    }
 }

@@ -139,9 +139,9 @@ Array parsing is recursive — each element is itself a frame, parsed by the sam
 
 ## Roadmap
 
-- [ ] Concurrent client handling (`Arc<Mutex<HashMap>>` + `thread::spawn`)
-- [ ] Disk persistence (append-only file / RDB snapshots)
-- [ ] TTL and key expiration (`EXPIRE`, `TTL`, `PERSIST`)
+- [x] Concurrent client handling (`Arc<Mutex<HashMap>>` + `thread::spawn`)
+- [x] Disk persistence (append-only file / RDB snapshots)
+- [x] TTL and key expiration (`EXPIRE`, `TTL`, `PERSIST`)
 - [ ] Additional commands (`MSET`, `MGET`, `INCR`, `DECR`, `FLUSHDB`)
 - [ ] Pipelining (multiple commands in a single TCP read)
 - [ ] Async I/O with tokio
