@@ -46,6 +46,9 @@ fn main() {
             Frame::BulkString(Some(s)) if s == "DEL" => {
                 hm.remove(&elements[1].get_value().unwrap().to_string());
             }
+            Frame::BulkString(Some(s)) if s == "FLUSHDB" => {
+                hm.clear();
+            }
             _ => (),
         };
         rem = remaining;
@@ -232,6 +235,16 @@ fn handle_connection(
                     }
                 }
                 Some(Frame::Array(keys))
+            }
+            Frame::BulkString(Some(s)) if s == "FLUSHDB" => {
+                hm.clear();
+
+                let command_frame =
+                    Frame::Array(vec![Frame::BulkString(Some("FLUSHDB".to_string()))]);
+                let command_string = encoder::encode_frame(&command_frame).unwrap();
+                file.write_all(command_string.as_bytes()).unwrap();
+
+                Some(Frame::SimpleString("OK".to_string()))
             }
             _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
         },
