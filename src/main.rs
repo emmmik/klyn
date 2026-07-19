@@ -195,7 +195,7 @@ fn handle_connection(
                 }
             }
             Frame::BulkString(Some(s)) if s == "DEL" => {
-                match &hm.get(&elements[1].get_value().unwrap().to_string()) {
+                match hm.get(&elements[1].get_value().unwrap().to_string()) {
                     Some(_value) => {
                         hm.remove(&elements[1].get_value().unwrap().to_string());
                         let command_frame = Frame::Array(vec![
@@ -210,9 +210,55 @@ fn handle_connection(
                 }
             }
             Frame::BulkString(Some(s)) if s == "EXISTS" => {
-                match &hm.get(&elements[1].get_value().unwrap().to_string()) {
+                match hm.get(&elements[1].get_value().unwrap().to_string()) {
                     Some(_value) => Some(Frame::Integer(1)),
                     _ => Some(Frame::Integer(0)),
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "INCR" => {
+                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        let parsed_key = value.0.parse::<i32>();
+                        match parsed_key {
+                            Ok(num) => {
+                                value.0 = (num + 1).to_string();
+                                Some(Frame::Integer(num + 1))
+                            }
+                            Err(_err) => Some(Frame::SimpleError(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )),
+                        }
+                    }
+                    _ => {
+                        hm.insert(
+                            elements[1].get_value().unwrap().to_string(),
+                            ("1".to_string(), None),
+                        );
+                        Some(Frame::Integer(1))
+                    }
+                }
+            }
+            Frame::BulkString(Some(s)) if s == "DECR" => {
+                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
+                    Some(value) => {
+                        let parsed_key = value.0.parse::<i32>();
+                        match parsed_key {
+                            Ok(num) => {
+                                value.0 = (num - 1).to_string();
+                                Some(Frame::Integer(num - 1))
+                            }
+                            Err(_err) => Some(Frame::SimpleError(
+                                "ERR value is not an integer or out of range".to_string(),
+                            )),
+                        }
+                    }
+                    _ => {
+                        hm.insert(
+                            elements[1].get_value().unwrap().to_string(),
+                            ("-1".to_string(), None),
+                        );
+                        Some(Frame::Integer(-1))
+                    }
                 }
             }
             Frame::BulkString(Some(s)) if s == "KEYS" => {
