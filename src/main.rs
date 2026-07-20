@@ -1,6 +1,9 @@
+mod db;
 mod encoder;
 mod frame;
 mod parser;
+#[cfg(test)]
+mod tests;
 
 use frame::Frame;
 
@@ -12,7 +15,7 @@ use std::{
     str,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 fn main() {
@@ -27,10 +30,13 @@ fn main() {
             .open("klyn.aof")
             .unwrap(),
     ));
+
     let file_string = std::fs::read_to_string("klyn.aof").unwrap();
     let file_vector: Vec<String> = file_string.split("\r\n").map(|s| s.to_string()).collect();
+
     let mut rem: Vec<String> = file_vector;
     rem.pop();
+
     while let Some((frame, remaining)) = parser::parse_frame(&rem) {
         let counter = Arc::clone(&db);
         let mut hm = counter.lock().unwrap();
@@ -87,211 +93,64 @@ fn handle_connection(
         .collect();
 
     let frame = parser::parse_frame(&request_vector).unwrap().0;
-    let mut hm = counter_db.lock().unwrap();
-    let mut file = counter_aof.lock().unwrap();
     let response: Option<Frame> = match frame {
         Frame::Array(elements) => match &elements[0] {
             Frame::BulkString(Some(s)) if s == "PING" => {
                 Some(Frame::SimpleString("PONG".to_string()))
             }
             Frame::BulkString(Some(s)) if s == "SET" => {
-                hm.insert(
-                    elements[1].get_value().unwrap().to_string(),
-                    (elements[2].get_value().unwrap().to_string(), None),
+                db::set(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                    &elements[2].get_value().unwrap().to_string(),
                 );
-
-                let command_frame = Frame::Array(vec![
-                    Frame::BulkString(Some("SET".to_string())),
-                    Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
-                    Frame::BulkString(Some(elements[2].get_value().unwrap().to_string())),
-                ]);
-                let command_string = encoder::encode_frame(&command_frame).unwrap();
-                file.write_all(command_string.as_bytes()).unwrap();
-
                 Some(Frame::SimpleString("OK".to_string()))
             }
-            Frame::BulkString(Some(s)) if s == "EXPIRE" => {
-                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        value.1 = Some(
-                            Instant::now()
-                                + Duration::from_secs(
-                                    elements[2].get_value().unwrap().parse::<u64>().unwrap(),
-                                ),
-                        );
-                        Some(Frame::Integer(1))
-                    }
-                    _ => Some(Frame::Integer(0)),
-                }
-            }
-            Frame::BulkString(Some(s)) if s == "TTL" => {
-                match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        if value.1 == None {
-                            Some(Frame::Integer(-1))
-                        } else if value.1.unwrap() >= Instant::now() {
-                            Some(Frame::Integer(
-                                (value.1.unwrap() - Instant::now()).as_secs() as i32,
-                            ))
-                        } else {
-                            hm.remove(&elements[1].get_value().unwrap().to_string());
-                            let command_frame = Frame::Array(vec![
-                                Frame::BulkString(Some("DEL".to_string())),
-                                Frame::BulkString(Some(
-                                    elements[1].get_value().unwrap().to_string(),
-                                )),
-                            ]);
-                            let command_string = encoder::encode_frame(&command_frame).unwrap();
-                            file.write_all(command_string.as_bytes()).unwrap();
-                            Some(Frame::Integer(-2))
-                        }
-                    }
-                    _ => Some(Frame::Integer(-2)),
-                }
-            }
-            Frame::BulkString(Some(s)) if s == "PERSIST" => {
-                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        if value.1 == None {
-                            Some(Frame::Integer(0))
-                        } else if value.1.unwrap() >= Instant::now() {
-                            value.1 = None;
-                            Some(Frame::Integer(1))
-                        } else {
-                            hm.remove(&elements[1].get_value().unwrap().to_string());
-                            let command_frame = Frame::Array(vec![
-                                Frame::BulkString(Some("DEL".to_string())),
-                                Frame::BulkString(Some(
-                                    elements[1].get_value().unwrap().to_string(),
-                                )),
-                            ]);
-                            let command_string = encoder::encode_frame(&command_frame).unwrap();
-                            file.write_all(command_string.as_bytes()).unwrap();
-                            Some(Frame::Integer(0))
-                        }
-                    }
-                    _ => Some(Frame::Integer(0)),
-                }
-            }
+            Frame::BulkString(Some(s)) if s == "EXPIRE" => db::expire(
+                counter_db,
+                &elements[1].get_value().unwrap().to_string(),
+                elements[2].get_value().unwrap().parse::<u64>().unwrap(),
+            ),
+            Frame::BulkString(Some(s)) if s == "TTL" => db::ttl(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
+            Frame::BulkString(Some(s)) if s == "PERSIST" => db::persist(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
             Frame::BulkString(Some(s)) if s == "GET" => {
-                match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        if value.1 == None || value.1.unwrap() >= Instant::now() {
-                            Some(Frame::BulkString(Some(value.0.to_string())))
-                        } else {
-                            hm.remove(&elements[1].get_value().unwrap().to_string());
-                            let command_frame = Frame::Array(vec![
-                                Frame::BulkString(Some("DEL".to_string())),
-                                Frame::BulkString(Some(
-                                    elements[1].get_value().unwrap().to_string(),
-                                )),
-                            ]);
-                            let command_string = encoder::encode_frame(&command_frame).unwrap();
-                            file.write_all(command_string.as_bytes()).unwrap();
-                            Some(Frame::BulkString(None))
-                        }
-                    }
+                let value = db::get(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                );
+                match value {
+                    Some(content) => Some(Frame::BulkString(Some(content.0.to_string()))),
                     _ => Some(Frame::BulkString(None)),
                 }
             }
-            Frame::BulkString(Some(s)) if s == "DEL" => {
-                match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(_value) => {
-                        hm.remove(&elements[1].get_value().unwrap().to_string());
-                        let command_frame = Frame::Array(vec![
-                            Frame::BulkString(Some("DEL".to_string())),
-                            Frame::BulkString(Some(elements[1].get_value().unwrap().to_string())),
-                        ]);
-                        let command_string = encoder::encode_frame(&command_frame).unwrap();
-                        file.write_all(command_string.as_bytes()).unwrap();
-                        Some(Frame::Integer(1))
-                    }
-                    _ => Some(Frame::Integer(0)),
-                }
-            }
-            Frame::BulkString(Some(s)) if s == "EXISTS" => {
-                match hm.get(&elements[1].get_value().unwrap().to_string()) {
-                    Some(_value) => Some(Frame::Integer(1)),
-                    _ => Some(Frame::Integer(0)),
-                }
-            }
+            Frame::BulkString(Some(s)) if s == "DEL" => db::del(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
+            Frame::BulkString(Some(s)) if s == "EXISTS" => db::exists(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
             Frame::BulkString(Some(s)) if s == "INCR" => {
-                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        let parsed_key = value.0.parse::<i32>();
-                        match parsed_key {
-                            Ok(num) => {
-                                value.0 = (num + 1).to_string();
-                                Some(Frame::Integer(num + 1))
-                            }
-                            Err(_err) => Some(Frame::SimpleError(
-                                "ERR value is not an integer or out of range".to_string(),
-                            )),
-                        }
-                    }
-                    _ => {
-                        hm.insert(
-                            elements[1].get_value().unwrap().to_string(),
-                            ("1".to_string(), None),
-                        );
-                        Some(Frame::Integer(1))
-                    }
-                }
+                db::incr(counter_db, &elements[1].get_value().unwrap().to_string())
             }
             Frame::BulkString(Some(s)) if s == "DECR" => {
-                match hm.get_mut(&elements[1].get_value().unwrap().to_string()) {
-                    Some(value) => {
-                        let parsed_key = value.0.parse::<i32>();
-                        match parsed_key {
-                            Ok(num) => {
-                                value.0 = (num - 1).to_string();
-                                Some(Frame::Integer(num - 1))
-                            }
-                            Err(_err) => Some(Frame::SimpleError(
-                                "ERR value is not an integer or out of range".to_string(),
-                            )),
-                        }
-                    }
-                    _ => {
-                        hm.insert(
-                            elements[1].get_value().unwrap().to_string(),
-                            ("-1".to_string(), None),
-                        );
-                        Some(Frame::Integer(-1))
-                    }
-                }
+                db::decr(counter_db, &elements[1].get_value().unwrap().to_string())
             }
-            Frame::BulkString(Some(s)) if s == "KEYS" => {
-                let mut keys: Vec<Frame> = Vec::new();
-                let values: Vec<_> = hm.clone().into_keys().collect();
-
-                for key in values {
-                    if let Some(value) = hm.get(&key) {
-                        if value.1 == None || value.1.unwrap() >= Instant::now() {
-                            keys.push(Frame::BulkString(Some(key)));
-                        } else {
-                            hm.remove(&key);
-                            let command_frame = Frame::Array(vec![
-                                Frame::BulkString(Some("DEL".to_string())),
-                                Frame::BulkString(Some(key)),
-                            ]);
-                            let command_string = encoder::encode_frame(&command_frame).unwrap();
-                            file.write_all(command_string.as_bytes()).unwrap();
-                        }
-                    }
-                }
-                Some(Frame::Array(keys))
-            }
-            Frame::BulkString(Some(s)) if s == "FLUSHDB" => {
-                hm.clear();
-
-                let command_frame =
-                    Frame::Array(vec![Frame::BulkString(Some("FLUSHDB".to_string()))]);
-                let command_string = encoder::encode_frame(&command_frame).unwrap();
-                file.write_all(command_string.as_bytes()).unwrap();
-
-                Some(Frame::SimpleString("OK".to_string()))
-            }
+            Frame::BulkString(Some(s)) if s == "KEYS" => db::keys(counter_db, counter_aof),
+            Frame::BulkString(Some(s)) if s == "FLUSHDB" => db::flushdb(counter_db, counter_aof),
             _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
         },
         _ => None,
