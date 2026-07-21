@@ -143,12 +143,16 @@ fn handle_connection(
                 counter_aof,
                 &elements[1].get_value().unwrap().to_string(),
             ),
-            Frame::BulkString(Some(s)) if s == "INCR" => {
-                db::incr(counter_db, &elements[1].get_value().unwrap().to_string())
-            }
-            Frame::BulkString(Some(s)) if s == "DECR" => {
-                db::decr(counter_db, &elements[1].get_value().unwrap().to_string())
-            }
+            Frame::BulkString(Some(s)) if s == "INCR" => db::incr(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
+            Frame::BulkString(Some(s)) if s == "DECR" => db::decr(
+                counter_db,
+                counter_aof,
+                &elements[1].get_value().unwrap().to_string(),
+            ),
             Frame::BulkString(Some(s)) if s == "KEYS" => db::keys(counter_db, counter_aof),
             Frame::BulkString(Some(s)) if s == "FLUSHDB" => db::flushdb(counter_db, counter_aof),
             _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),

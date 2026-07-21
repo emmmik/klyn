@@ -153,9 +153,11 @@ pub fn persist(
 
 pub fn incr(
     counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
+    counter_aof: &Arc<Mutex<File>>,
     key: &String,
 ) -> Option<Frame> {
     let mut hm = counter_db.lock().unwrap();
+    let mut file = counter_aof.lock().unwrap();
 
     match hm.get_mut(key) {
         Some(value) => {
@@ -163,6 +165,15 @@ pub fn incr(
             match parsed_key {
                 Ok(num) => {
                     value.0 = (num + 1).to_string();
+
+                    let command_frame = Frame::Array(vec![
+                        Frame::BulkString(Some("SET".to_string())),
+                        Frame::BulkString(Some(key.clone())),
+                        Frame::BulkString(Some((num + 1).to_string())),
+                    ]);
+                    let command_string = encoder::encode_frame(&command_frame).unwrap();
+                    file.write_all(command_string.as_bytes()).unwrap();
+
                     Some(Frame::Integer(num + 1))
                 }
                 Err(_err) => Some(Frame::SimpleError(
@@ -172,6 +183,15 @@ pub fn incr(
         }
         _ => {
             hm.insert(key.clone(), ("1".to_string(), None));
+
+            let command_frame = Frame::Array(vec![
+                Frame::BulkString(Some("SET".to_string())),
+                Frame::BulkString(Some(key.clone())),
+                Frame::BulkString(Some("1".to_string())),
+            ]);
+            let command_string = encoder::encode_frame(&command_frame).unwrap();
+            file.write_all(command_string.as_bytes()).unwrap();
+
             Some(Frame::Integer(1))
         }
     }
@@ -179,9 +199,11 @@ pub fn incr(
 
 pub fn decr(
     counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
+    counter_aof: &Arc<Mutex<File>>,
     key: &String,
 ) -> Option<Frame> {
     let mut hm = counter_db.lock().unwrap();
+    let mut file = counter_aof.lock().unwrap();
 
     match hm.get_mut(key) {
         Some(value) => {
@@ -189,6 +211,13 @@ pub fn decr(
             match parsed_key {
                 Ok(num) => {
                     value.0 = (num - 1).to_string();
+                    let command_frame = Frame::Array(vec![
+                        Frame::BulkString(Some("SET".to_string())),
+                        Frame::BulkString(Some(key.clone())),
+                        Frame::BulkString(Some((num - 1).to_string())),
+                    ]);
+                    let command_string = encoder::encode_frame(&command_frame).unwrap();
+                    file.write_all(command_string.as_bytes()).unwrap();
                     Some(Frame::Integer(num - 1))
                 }
                 Err(_err) => Some(Frame::SimpleError(
@@ -198,6 +227,15 @@ pub fn decr(
         }
         _ => {
             hm.insert(key.clone(), ("-1".to_string(), None));
+
+            let command_frame = Frame::Array(vec![
+                Frame::BulkString(Some("SET".to_string())),
+                Frame::BulkString(Some(key.clone())),
+                Frame::BulkString(Some("-1".to_string())),
+            ]);
+            let command_string = encoder::encode_frame(&command_frame).unwrap();
+            file.write_all(command_string.as_bytes()).unwrap();
+
             Some(Frame::Integer(-1))
         }
     }
