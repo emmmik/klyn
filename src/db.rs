@@ -284,3 +284,33 @@ pub fn flushdb(
 
     Some(Frame::SimpleString("OK".to_string()))
 }
+
+pub fn rename(
+    counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
+    counter_aof: &Arc<Mutex<File>>,
+    key: &String,
+    new_key: &String,
+) -> Option<Frame> {
+    if key == new_key {
+        return Some(Frame::SimpleError(
+            "ERR Source and destination keys are the same".to_string(),
+        ));
+    }
+
+    if let Some(_value) = get(counter_db, counter_aof, new_key) {
+        return Some(Frame::SimpleError(
+            "ERR Targer key name is busy".to_string(),
+        ));
+    }
+
+    let current_value = get(counter_db, counter_aof, key);
+    if current_value.is_none() {
+        return Some(Frame::SimpleError("ERR No such key".to_string()));
+    }
+    let current_value = current_value.unwrap();
+
+    del(counter_db, counter_aof, key);
+    set(counter_db, counter_aof, new_key, &current_value.0);
+
+    Some(Frame::SimpleString("OK".to_string()))
+}

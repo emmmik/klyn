@@ -73,7 +73,7 @@ fn test_exists_missing() {
 fn test_incr_new_key() {
     let (db, aof) = setup();
     let _ = db::set(&db, &aof, &"_p".to_string(), &"_".to_string());
-    let result = db::incr(&db, &"counter".to_string());
+    let result = db::incr(&db, &aof, &"counter".to_string());
     assert_eq!(result, Some(Frame::Integer(1)));
 }
 
@@ -81,7 +81,7 @@ fn test_incr_new_key() {
 fn test_incr_existing_key() {
     let (db, aof) = setup();
     db::set(&db, &aof, &"counter".to_string(), &"5".to_string());
-    let result = db::incr(&db, &"counter".to_string());
+    let result = db::incr(&db, &aof, &"counter".to_string());
     assert_eq!(result, Some(Frame::Integer(6)));
 }
 
@@ -89,7 +89,7 @@ fn test_incr_existing_key() {
 fn test_decr_new_key() {
     let (db, aof) = setup();
     let _ = db::set(&db, &aof, &"_p".to_string(), &"_".to_string());
-    let result = db::decr(&db, &"c".to_string());
+    let result = db::decr(&db, &aof, &"c".to_string());
     assert_eq!(result, Some(Frame::Integer(-1)));
 }
 
@@ -97,7 +97,7 @@ fn test_decr_new_key() {
 fn test_incr_non_integer_value() {
     let (db, aof) = setup();
     db::set(&db, &aof, &"key".to_string(), &"hello".to_string());
-    let result = db::incr(&db, &"key".to_string());
+    let result = db::incr(&db, &aof, &"key".to_string());
     assert_eq!(
         result,
         Some(Frame::SimpleError(
@@ -194,4 +194,62 @@ fn test_keys() {
     } else {
         panic!("Expected Array frame, got {:?}", keys_result);
     }
+}
+
+#[test]
+fn test_rename_success() {
+    let (db, aof) = setup();
+    db::set(&db, &aof, &"old_key".to_string(), &"value".to_string());
+
+    let result = db::rename(&db, &aof, &"old_key".to_string(), &"new_key".to_string());
+    assert_eq!(result, Some(Frame::SimpleString("OK".to_string())));
+
+    assert_eq!(db::get(&db, &aof, &"old_key".to_string()), None);
+    let value = db::get(&db, &aof, &"new_key".to_string());
+    assert_eq!(value.unwrap().0, "value");
+}
+
+#[test]
+fn test_rename_same_key() {
+    let (db, aof) = setup();
+    db::set(&db, &aof, &"key".to_string(), &"value".to_string());
+
+    let result = db::rename(&db, &aof, &"key".to_string(), &"key".to_string());
+    assert_eq!(
+        result,
+        Some(Frame::SimpleError(
+            "ERR Source and destination keys are the same".to_string()
+        ))
+    );
+}
+
+#[test]
+fn test_rename_missing_source() {
+    let (db, aof) = setup();
+
+    let result = db::rename(
+        &db,
+        &aof,
+        &"nonexistent".to_string(),
+        &"new_key".to_string(),
+    );
+    assert_eq!(
+        result,
+        Some(Frame::SimpleError("ERR No such key".to_string()))
+    );
+}
+
+#[test]
+fn test_rename_target_exists() {
+    let (db, aof) = setup();
+    db::set(&db, &aof, &"old_key".to_string(), &"value".to_string());
+    db::set(&db, &aof, &"new_key".to_string(), &"other".to_string());
+
+    let result = db::rename(&db, &aof, &"old_key".to_string(), &"new_key".to_string());
+    assert_eq!(
+        result,
+        Some(Frame::SimpleError(
+            "ERR Targer key name is busy".to_string()
+        ))
+    );
 }
