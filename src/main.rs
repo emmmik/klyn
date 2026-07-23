@@ -107,6 +107,32 @@ fn handle_connection(
                 );
                 Some(Frame::SimpleString("OK".to_string()))
             }
+            Frame::BulkString(Some(s)) if s == "MSET" => {
+                for i in (1..elements.len()).step_by(2) {
+                    db::set(
+                        counter_db,
+                        counter_aof,
+                        &elements[i].get_value().unwrap().to_string(),
+                        &elements[i + 1].get_value().unwrap().to_string(),
+                    );
+                }
+                Some(Frame::SimpleString("OK".to_string()))
+            }
+            Frame::BulkString(Some(s)) if s == "MGET" => {
+                let mut values: Vec<Frame> = Vec::new();
+                for element in &elements[1..] {
+                    let received_frame = match db::get(
+                        counter_db,
+                        counter_aof,
+                        &element.get_value().unwrap().to_string(),
+                    ) {
+                        Some(value) => Frame::BulkString(Some(value.0)),
+                        _ => Frame::BulkString(None),
+                    };
+                    values.push(received_frame);
+                }
+                Some(Frame::Array(values))
+            }
             Frame::BulkString(Some(s)) if s == "EXPIRE" => db::expire(
                 counter_db,
                 &elements[1].get_value().unwrap().to_string(),
