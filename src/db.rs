@@ -314,3 +314,30 @@ pub fn rename(
 
     Some(Frame::SimpleString("OK".to_string()))
 }
+
+pub fn append(
+    counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
+    counter_aof: &Arc<Mutex<File>>,
+    key: &String,
+    append_value: &String,
+) {
+    let new_value_with_ttl = match get(counter_db, counter_aof, key) {
+        Some(value) => {
+            let new_string = value.0 + append_value;
+            (new_string, value.1)
+        }
+        _ => (append_value.clone(), None),
+    };
+    let mut hm = counter_db.lock().unwrap();
+    let mut file = counter_aof.lock().unwrap();
+
+    hm.insert(key.clone(), new_value_with_ttl.clone());
+
+    let command_frame = Frame::Array(vec![
+        Frame::BulkString(Some("SET".to_string())),
+        Frame::BulkString(Some(key.clone())),
+        Frame::BulkString(Some(new_value_with_ttl.0)),
+    ]);
+    let command_string = encoder::encode_frame(&command_frame).unwrap();
+    file.write_all(command_string.as_bytes()).unwrap();
+}

@@ -185,6 +185,15 @@ fn handle_connection(
                 &elements[1].get_value().unwrap().to_string(),
                 &elements[2].get_value().unwrap().to_string(),
             ),
+            Frame::BulkString(Some(s)) if s == "APPEND" => {
+                db::append(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                    &elements[2].get_value().unwrap().to_string(),
+                );
+                Some(Frame::BulkString(Some("OK".to_string())))
+            }
             Frame::BulkString(Some(s)) if s == "KEYS" => db::keys(counter_db, counter_aof),
             Frame::BulkString(Some(s)) if s == "FLUSHDB" => db::flushdb(counter_db, counter_aof),
             _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
