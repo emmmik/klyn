@@ -69,7 +69,6 @@ fn main() {
             // let mut hm = counter_db.lock().unwrap();
             // let mut file = counter_aof.lock().unwrap();
             let stream = stream.unwrap();
-
             handle_connection(stream, &counter_db, &counter_aof);
         });
         handles.push(handle);
@@ -84,128 +83,132 @@ fn handle_connection(
     counter_db: &Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>,
     counter_aof: &Arc<Mutex<File>>,
 ) {
-    let mut buffer = [0; 512];
-    let buffer_size = stream.read(&mut buffer).unwrap();
-    let request_string = str::from_utf8(&buffer[..buffer_size]).unwrap();
-    let request_vector: Vec<String> = request_string
-        .split("\r\n")
-        .map(|s| s.to_string())
-        .collect();
+    loop {
+        let mut buffer = [0; 512];
+        let buffer_size = stream.read(&mut buffer).unwrap();
+        let request_string = str::from_utf8(&buffer[..buffer_size]).unwrap();
+        let request_vector: Vec<String> = request_string
+            .split("\r\n")
+            .map(|s| s.to_string())
+            .collect();
 
-    let frame = parser::parse_frame(&request_vector).unwrap().0;
-    let response: Option<Frame> = match frame {
-        Frame::Array(elements) => match &elements[0] {
-            Frame::BulkString(Some(s)) if s == "PING" => {
-                Some(Frame::SimpleString("PONG".to_string()))
-            }
-            Frame::BulkString(Some(s)) if s == "SET" => {
-                db::set(
-                    counter_db,
-                    counter_aof,
-                    &elements[1].get_value().unwrap().to_string(),
-                    &elements[2].get_value().unwrap().to_string(),
-                );
-                Some(Frame::SimpleString("OK".to_string()))
-            }
-            Frame::BulkString(Some(s)) if s == "MSET" => {
-                for i in (1..elements.len()).step_by(2) {
+        let frame = parser::parse_frame(&request_vector).unwrap().0;
+        let response: Option<Frame> = match frame {
+            Frame::Array(elements) => match &elements[0] {
+                Frame::BulkString(Some(s)) if s == "PING" => {
+                    Some(Frame::SimpleString("PONG".to_string()))
+                }
+                Frame::BulkString(Some(s)) if s == "SET" => {
                     db::set(
                         counter_db,
                         counter_aof,
-                        &elements[i].get_value().unwrap().to_string(),
-                        &elements[i + 1].get_value().unwrap().to_string(),
+                        &elements[1].get_value().unwrap().to_string(),
+                        &elements[2].get_value().unwrap().to_string(),
                     );
+                    Some(Frame::SimpleString("OK".to_string()))
                 }
-                Some(Frame::SimpleString("OK".to_string()))
-            }
-            Frame::BulkString(Some(s)) if s == "MGET" => {
-                let mut values: Vec<Frame> = Vec::new();
-                for element in &elements[1..] {
-                    let received_frame = match db::get(
-                        counter_db,
-                        counter_aof,
-                        &element.get_value().unwrap().to_string(),
-                    ) {
-                        Some(value) => Frame::BulkString(Some(value.0)),
-                        _ => Frame::BulkString(None),
-                    };
-                    values.push(received_frame);
+                Frame::BulkString(Some(s)) if s == "MSET" => {
+                    for i in (1..elements.len()).step_by(2) {
+                        db::set(
+                            counter_db,
+                            counter_aof,
+                            &elements[i].get_value().unwrap().to_string(),
+                            &elements[i + 1].get_value().unwrap().to_string(),
+                        );
+                    }
+                    Some(Frame::SimpleString("OK".to_string()))
                 }
-                Some(Frame::Array(values))
-            }
-            Frame::BulkString(Some(s)) if s == "EXPIRE" => db::expire(
-                counter_db,
-                &elements[1].get_value().unwrap().to_string(),
-                elements[2].get_value().unwrap().parse::<u64>().unwrap(),
-            ),
-            Frame::BulkString(Some(s)) if s == "TTL" => db::ttl(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "PERSIST" => db::persist(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "GET" => {
-                let value = db::get(
+                Frame::BulkString(Some(s)) if s == "MGET" => {
+                    let mut values: Vec<Frame> = Vec::new();
+                    for element in &elements[1..] {
+                        let received_frame = match db::get(
+                            counter_db,
+                            counter_aof,
+                            &element.get_value().unwrap().to_string(),
+                        ) {
+                            Some(value) => Frame::BulkString(Some(value.0)),
+                            _ => Frame::BulkString(None),
+                        };
+                        values.push(received_frame);
+                    }
+                    Some(Frame::Array(values))
+                }
+                Frame::BulkString(Some(s)) if s == "EXPIRE" => db::expire(
+                    counter_db,
+                    &elements[1].get_value().unwrap().to_string(),
+                    elements[2].get_value().unwrap().parse::<u64>().unwrap(),
+                ),
+                Frame::BulkString(Some(s)) if s == "TTL" => db::ttl(
                     counter_db,
                     counter_aof,
                     &elements[1].get_value().unwrap().to_string(),
-                );
-                match value {
-                    Some(content) => Some(Frame::BulkString(Some(content.0.to_string()))),
-                    _ => Some(Frame::BulkString(None)),
+                ),
+                Frame::BulkString(Some(s)) if s == "PERSIST" => db::persist(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                ),
+                Frame::BulkString(Some(s)) if s == "GET" => {
+                    let value = db::get(
+                        counter_db,
+                        counter_aof,
+                        &elements[1].get_value().unwrap().to_string(),
+                    );
+                    match value {
+                        Some(content) => Some(Frame::BulkString(Some(content.0.to_string()))),
+                        _ => Some(Frame::BulkString(None)),
+                    }
                 }
-            }
-            Frame::BulkString(Some(s)) if s == "DEL" => db::del(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "EXISTS" => db::exists(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "INCR" => db::incr(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "DECR" => db::decr(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "RENAME" => db::rename(
-                counter_db,
-                counter_aof,
-                &elements[1].get_value().unwrap().to_string(),
-                &elements[2].get_value().unwrap().to_string(),
-            ),
-            Frame::BulkString(Some(s)) if s == "APPEND" => {
-                db::append(
+                Frame::BulkString(Some(s)) if s == "DEL" => db::del(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                ),
+                Frame::BulkString(Some(s)) if s == "EXISTS" => db::exists(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                ),
+                Frame::BulkString(Some(s)) if s == "INCR" => db::incr(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                ),
+                Frame::BulkString(Some(s)) if s == "DECR" => db::decr(
+                    counter_db,
+                    counter_aof,
+                    &elements[1].get_value().unwrap().to_string(),
+                ),
+                Frame::BulkString(Some(s)) if s == "RENAME" => db::rename(
                     counter_db,
                     counter_aof,
                     &elements[1].get_value().unwrap().to_string(),
                     &elements[2].get_value().unwrap().to_string(),
-                );
-                Some(Frame::BulkString(Some("OK".to_string())))
-            }
-            Frame::BulkString(Some(s)) if s == "KEYS" => db::keys(counter_db, counter_aof),
-            Frame::BulkString(Some(s)) if s == "FLUSHDB" => db::flushdb(counter_db, counter_aof),
-            _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
-        },
-        _ => None,
-    };
+                ),
+                Frame::BulkString(Some(s)) if s == "APPEND" => {
+                    db::append(
+                        counter_db,
+                        counter_aof,
+                        &elements[1].get_value().unwrap().to_string(),
+                        &elements[2].get_value().unwrap().to_string(),
+                    );
+                    Some(Frame::BulkString(Some("OK".to_string())))
+                }
+                Frame::BulkString(Some(s)) if s == "KEYS" => db::keys(counter_db, counter_aof),
+                Frame::BulkString(Some(s)) if s == "FLUSHDB" => {
+                    db::flushdb(counter_db, counter_aof)
+                }
+                _ => Some(Frame::SimpleError("ERR Unknown command".to_string())),
+            },
+            _ => None,
+        };
 
-    stream
-        .write_all(
-            encoder::encode_frame(&response.unwrap())
-                .unwrap()
-                .as_bytes(),
-        )
-        .unwrap();
+        stream
+            .write_all(
+                encoder::encode_frame(&response.unwrap())
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+    }
 }
