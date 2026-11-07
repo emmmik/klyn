@@ -24,7 +24,7 @@ The goal: understand what actually happens when a client sends `SET foo bar` to 
 ### Supported Commands
 
 | Command | Syntax | Response |
-|---------|--------|----------|
+| --------- | -------- | ---------- |
 | `PING` | `PING` | `+PONG\r\n` |
 | `SET` | `SET key value` | `+OK\r\n` |
 | `GET` | `GET key` | `$<len>\r\n<value>\r\n` or `$-1\r\n` (nil) |
@@ -40,26 +40,69 @@ The goal: understand what actually happens when a client sends `SET foo bar` to 
 
 ## Quick Start
 
-```bash
-# Build and run
-cargo run
-```
+### Prerequisites
+
+Building needs only a Rust toolchain — the server itself has zero dependencies.
+
+To **use** it you need a RESP client. klyn speaks Redis's wire protocol, so Redis's own tooling drives it:
+
+| Platform | Install |
+| --- | --- |
+| Arch | `sudo pacman -S redis` |
+| Debian / Ubuntu | `sudo apt install redis-tools` |
+| macOS | `brew install redis` |
+
+That gives you `redis-cli` (interactive client) and `redis-benchmark` (load generator).
+
+If you'd rather install nothing, raw RESP over `nc` works for simple checks — see below.
+
+### Build and run
 
 ```bash
-# In another terminal — one-shot redis-cli commands (each opens its own connection)
-redis-cli -p 6379 PING                    # PONG
-redis-cli -p 6379 SET name emmanuel       # OK
-redis-cli -p 6379 GET name                # "emmanuel"
-redis-cli -p 6379 INCR counter            # (integer) 1
-redis-cli -p 6379 INCR counter            # (integer) 2
-redis-cli -p 6379 EXPIRE counter 60       # (integer) 1
-redis-cli -p 6379 TTL counter             # (integer) 59
-redis-cli -p 6379 PERSIST counter         # (integer) 1
-redis-cli -p 6379 KEYS                    # 1) "name"  2) "counter"
-redis-cli -p 6379 DEL name                # (integer) 1
+cargo build --release
+./target/release/klyn
 ```
 
-Or test with raw RESP bytes:
+### Talk to it
+
+Interactive session — `redis-cli` keeps one connection open and sends one command per line:
+
+```bash
+redis-cli -p 6379
+```
+
+```
+127.0.0.1:6379> PING
+PONG
+127.0.0.1:6379> SET name emmanuel
+OK
+127.0.0.1:6379> GET name
+"emmanuel"
+127.0.0.1:6379> INCR counter
+(integer) 1
+127.0.0.1:6379> INCR counter
+(integer) 2
+127.0.0.1:6379> EXPIRE counter 60
+(integer) 1
+127.0.0.1:6379> TTL counter
+(integer) 59
+127.0.0.1:6379> PERSIST counter
+(integer) 1
+127.0.0.1:6379> KEYS
+1) "name"
+2) "counter"
+127.0.0.1:6379> DEL name
+(integer) 1
+```
+
+Or one-shot from your shell:
+
+```bash
+redis-cli -p 6379 SET name emmanuel
+redis-cli -p 6379 GET name
+```
+
+Or test with raw RESP bytes, no client at all:
 
 ```bash
 printf '*1\r\n$4\r\nPING\r\n' | nc localhost 6379
@@ -154,7 +197,7 @@ cargo test
 
 Honest trade-offs, in roughly the order I plan to fix them:
 
-- **One command per connection.** The handler performs a single `read()` and returns, so the connection closes after one command and interactive `redis-cli` sessions drop. Pipelined frames sent in one write are parsed but discarded.
+- **Pipelined commands are dropped.** Sequential commands on one connection work, but when several frames arrive in a single `write()` only the first is executed — the parser returns the unconsumed remainder and the handler discards it.
 - **Not binary-safe.** The parser splits on `\r\n` as strings, so values containing `\r\n` or non-UTF-8 bytes will corrupt parsing.
 - **Partial AOF coverage.** `INCR`, `DECR`, `EXPIRE`, and `PERSIST` mutate state but aren't logged yet, so those changes don't survive a restart.
 - **Fixed 512-byte buffer.** Larger commands are truncated.
@@ -192,11 +235,12 @@ Honest trade-offs, in roughly the order I plan to fix them:
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
+| ------- | ----------- |
 | Language | Rust (edition 2024) |
 | Networking | `std::net::TcpListener` / `TcpStream` |
 | Concurrency | `std::thread` + `Arc` / `Mutex` |
 | I/O | `std::io::Read` / `Write` traits |
 | Storage | `std::collections::HashMap` |
 | Persistence | Append-only file (`klyn.aof`), RESP-encoded |
-| Dependencies | None — zero external crates |
+| Build dependencies | None — zero external crates |
+| Client tooling | Any RESP client (`redis-cli`, `redis-benchmark`) |
