@@ -24,3 +24,5 @@ rustc-ice-*.txt
 #.idea/
 
 dump.rdb
+
+appendonlydir/

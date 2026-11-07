@@ -19,7 +19,7 @@ The goal: understand what actually happens when a client sends `SET foo bar` to 
 - ✅ AOF (append-only file) persistence — write commands logged in RESP format, replayed on startup
 - ✅ TTL / key expiration — lazy expiry with `EXPIRE`, `TTL`, `PERSIST`
 - ✅ Atomic counters — `INCR` / `DECR` with proper error handling for non-integer values
-- ✅ 17 unit tests covering the storage layer
+- ✅ 21 unit tests covering the storage layer
 
 ### Supported Commands
 
@@ -44,13 +44,15 @@ The goal: understand what actually happens when a client sends `SET foo bar` to 
 
 Building needs only a Rust toolchain — the server itself has zero dependencies.
 
-To **use** it you need a RESP client. klyn speaks Redis's wire protocol, so Redis's own tooling drives it:
+To **use** it you need a RESP client. klyn speaks the Redis wire protocol, so Redis's own tooling drives it:
 
 | Platform | Install |
 | --- | --- |
-| Arch | `sudo pacman -S redis` |
+| Arch | `sudo pacman -S valkey` |
 | Debian / Ubuntu | `sudo apt install redis-tools` |
 | macOS | `brew install redis` |
+
+On Arch the package is called `valkey` — it provides the `redis` name and ships `redis-server`, `redis-cli` and `redis-benchmark`. Elsewhere the same tools come from the Redis packages.
 
 That gives you `redis-cli` (interactive client) and `redis-benchmark` (load generator).
 
@@ -111,6 +113,31 @@ printf '*1\r\n$4\r\nPING\r\n' | nc localhost 6379
 
 Restart the server and your `SET`/`DEL`/`FLUSHDB` history is replayed from `klyn.aof`.
 
+## Performance
+
+Benchmarked against **Valkey 9.1.2** — the open-source fork of Redis 7.2 that Arch Linux ships in place of Redis — on the same machine, both servers running with an append-only log enabled from an empty keyspace. Full setup, every run and the discarded attempts: [BENCH.md](BENCH.md).
+
+`redis-benchmark -n 200000 -c 8 -t set -r 100000` — 200,000 `SET`s over 8 persistent connections across 100,000 distinct keys.
+
+| Metric | klyn | Valkey 9.1.2 |
+| --- | --- | --- |
+| Throughput | 58,928 req/s | ~70,300 req/s |
+| p50 latency | 0.087 ms | 0.087 ms |
+| p99 latency | 0.279 ms | 0.227 ms |
+| Worst observed | 9.551 ms | 1.15–1.30 ms |
+| CPU consumed | 1.94 cores | ~0.85 cores |
+| CPU per request | 32.9 µs | ~12.5 µs |
+
+**Median latency is identical.** Both answer the typical request in 87 µs. At this scale a request costs a loopback round trip rather than a data-structure operation — which is why keyspace size barely matters: one distinct key and 100,000 distinct keys differ by 2.3% in throughput.
+
+**Throughput is bought with CPU.** klyn reaches 84% of Valkey's throughput for roughly 2.5× the CPU per request. Valkey executes commands on a single thread; klyn spawns a thread per connection, but the global mutex described in the [Concurrency Model](#concurrency-model) serialises every command that touches state. The threads therefore parallelise parsing, encoding and socket I/O rather than the data structure — measured at 1.94 cores under load, not 8.
+
+**The tail is where it loses.** The slowest request is 7× Valkey's. About one request in 6,000 exceeds 1 ms against an 87 µs median. The AOF is written on the command path while the lock is held, so a slow write stalls the request that triggered it. *The spike is measured; its cause is not isolated.*
+
+**Scaling.** Throughput peaks at 8 concurrent clients, matching the 8 hardware threads, then flattens (−4% at 50 clients) while p50 latency grows 5×. That shape is a saturated queue rather than a slow server. The 1-to-8 client speedup of 3.2× corresponds to roughly a 22% serial fraction, which caps the achievable gain at about 4.6× regardless of core count.
+
+**Caveats.** Client and server share the same 4-core machine, so both figures include contention with the load generator. All traffic is loopback, which hides network-path effects such as Nagle and delayed ACK. Valkey 9.1.2 descends from Redis 7.2.4, the last BSD-licensed release, so it is a newer and faster baseline than Redis 7 itself. Throughput reproduced within 2% across three independent runs.
+
 ## Architecture
 
 ```
@@ -153,7 +180,7 @@ src/
 ├── parser.rs   # Raw text → Frame (recursive for arrays)
 ├── encoder.rs  # Frame → RESP wire bytes
 ├── db.rs       # Command implementations against the shared HashMap
-├── tests.rs    # 17 unit tests for the storage layer
+├── tests.rs    # 21 unit tests for the storage layer
 └── main.rs     # TCP listener, thread spawn, AOF replay, command router
 ```
 
@@ -175,7 +202,7 @@ The parser reads raw input and produces a `Frame`. The encoder takes a `Frame` a
 
 ### Concurrency Model
 
-Each incoming connection gets its own `std::thread`. The database is an `Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>` — the tuple stores the value plus an optional expiry timestamp. The AOF file handle is shared the same way, so every write command is serialized through the mutex before hitting disk.
+Each incoming connection gets its own `std::thread`. The database is an `Arc<Mutex<HashMap<String, (String, Option<Instant>)>>>` — the tuple stores the value plus an optional expiry timestamp. The AOF file handle is shared the same way, so every write command is serialized through the mutex before hitting disk. That serialisation is what the benchmark measures: the server peaks at 1.94 cores on an 8-thread machine rather than scaling across all of them — see [Performance](#performance).
 
 ### Expiration Model
 
@@ -191,7 +218,7 @@ Expiration is **lazy** (passive): keys are checked against their `Instant` deadl
 cargo test
 ```
 
-17 unit tests cover the storage layer: set/get, delete semantics, existence checks, counter behavior (including the non-integer error path), expiry lifecycle (`EXPIRE` → `TTL` → `PERSIST`), key listing, and database flushing. Tests use an isolated AOF at `/tmp/klyn_test.aof` so they never touch real data.
+21 unit tests cover the storage layer: set/get, delete semantics, existence checks, counter behavior (including the non-integer error path), expiry lifecycle (`EXPIRE` → `TTL` → `PERSIST`), key listing, and database flushing. Tests use an isolated AOF at `/tmp/klyn_test.aof` so they never touch real data.
 
 ## Known Limitations
 
@@ -231,6 +258,7 @@ Honest trade-offs, in roughly the order I plan to fix them:
 - **Enum-driven design** — using Rust's algebraic enums to model protocol types, matching on variants to dispatch behavior.
 - **Persistence fundamentals** — append-only logs, replay-based recovery, why databases log mutations instead of rewriting state.
 - **Standard library fluency** — `HashMap`, `Vec`, `Instant`/`Duration`, `OpenOptions`, iterators — all without external dependencies.
+- **Measurement** — benchmarking against a reference implementation, reading percentile latency rather than averages, and separating "my server is slow" from "my benchmark is measuring the client".
 
 ## Tech Stack
 
